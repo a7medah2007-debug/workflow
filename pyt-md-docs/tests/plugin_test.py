@@ -1,0 +1,1111 @@
+import re
+
+from _pytest.pytester import LineMatcher
+
+import pytest_markdown_docs  # hack: used for storing a side effect in one of the tests
+
+
+def test_docstring_markdown(testdir):
+    testdir.makeconftest(
+        """
+        def pytest_markdown_docs_globals():
+            return {"a": "hello"}
+    """
+    )
+    testdir.makepyfile(
+        """
+        def simple():
+            \"\"\"
+            ```python
+            import pytest_markdown_docs
+            pytest_markdown_docs.side_effect = "hello"
+            ```
+
+            ```
+            not a python block
+            ```
+            \"\"\"
+
+
+        class Parent:
+            def using_global(self):
+                \"\"\"
+                ```python
+                assert a + " world" == "hello world"
+                ```
+                \"\"\"
+
+        def failing():
+            \"\"\"
+            ```python
+            assert False
+            ```
+            \"\"\"
+
+        def error():
+            \"\"\"
+            ```python
+            raise Exception("oops")
+            ```
+            \"\"\"
+    """
+    )
+    result = testdir.runpytest("--markdown-docs")
+    result.assert_outcomes(passed=2, failed=2)
+    assert (
+        getattr(pytest_markdown_docs, "side_effect", None) == "hello"
+    )  # hack to make sure the test actually does something
+
+
+def test_markdown_text_file(testdir):
+    testdir.makeconftest(
+        """
+        def pytest_markdown_docs_globals():
+            return {"a": "hello"}
+    """
+    )
+
+    testdir.makefile(
+        ".md",
+        """
+        ```python
+        assert a + " world" == "hello world"
+        ```
+
+        ```python
+        assert False
+        ```
+
+        ```python
+        **@ # this is a syntax error
+        ```
+    """,
+    )
+    result = testdir.runpytest("--markdown-docs")
+    result.assert_outcomes(passed=1, failed=2)
+
+
+def test_continuation(testdir):
+    testdir.makefile(
+        ".md",
+        """
+        ```python
+        b = "hello"
+        ```
+
+        ```python continuation
+        assert b + " world" == "hello world"
+        ```
+    """,
+    )
+    result = testdir.runpytest("--markdown-docs")
+    result.assert_outcomes(passed=2)
+
+
+def test_traceback(testdir):
+    testdir.makefile(
+        ".md",
+        """
+        yada yada yada
+
+        ```python
+        def foo():
+            raise Exception("doh")
+
+        def bar():
+            foo()
+
+        foo()
+        ```
+    """,
+    )
+    result = testdir.runpytest("--markdown-docs")
+    result.assert_outcomes(passed=0, failed=1)
+
+    # we check the traceback vs a regex pattern since the file paths can change
+    expected_output_pattern = r"""
+Error in code block:
+     ```
+ 4   def foo\(\):
+ 5       raise Exception\("doh"\)
+ 6
+ 7   def bar\(\):
+ 8       foo\(\)
+ 9
+10   foo\(\)
+     ```
+Traceback \(most recent call last\):
+  File ".*/test_traceback.md", line 10, in <module>
+    foo\(\)
+  File ".*/test_traceback.md", line 5, in foo
+    raise Exception\("doh"\)
+Exception: doh
+""".strip()
+    pytest_output = "\n".join(line.rstrip() for line in result.outlines).strip()
+    assert re.search(expected_output_pattern, pytest_output) is not None, (
+        "Output traceback doesn't match expected value"
+    )
+
+
+def test_autouse_fixtures(testdir):
+    testdir.makeconftest(
+        """
+import pytest
+
+@pytest.fixture(autouse=True)
+def initialize():
+    import pytest_markdown_docs
+    pytest_markdown_docs.bump = getattr(pytest_markdown_docs, "bump", 0) + 1
+    yield
+    pytest_markdown_docs.bump -= 1
+"""
+    )
+
+    testdir.makefile(
+        ".md",
+        """
+        ```python
+        import pytest_markdown_docs
+        assert pytest_markdown_docs.bump == 1
+        ```
+    """,
+    )
+    result = testdir.runpytest("--markdown-docs")
+    result.assert_outcomes(passed=1)
+
+
+def test_specific_fixtures(testdir):
+    testdir.makeconftest(
+        """
+import pytest
+
+@pytest.fixture()
+def initialize_specific():
+    import pytest_markdown_docs
+    pytest_markdown_docs.bump = getattr(pytest_markdown_docs, "bump", 0) + 1
+    yield "foobar"
+    pytest_markdown_docs.bump -= 1
+"""
+    )
+
+    testdir.makefile(
+        ".md",
+        """
+        \"\"\"
+        ```python fixture:initialize_specific
+        import pytest_markdown_docs
+        assert pytest_markdown_docs.bump == 1
+        assert initialize_specific == "foobar"
+        ```
+        \"\"\"
+    """,
+    )
+    result = testdir.runpytest("--markdown-docs")
+    result.assert_outcomes(passed=1)
+
+
+def test_non_existing_fixture_error(testdir):
+    testdir.makeconftest(
+        """
+import pytest
+
+@pytest.fixture()
+def foo():
+    pass
+"""
+    )
+
+    testdir.makefile(
+        ".md",
+        """
+        \"\"\"
+        ```python fixture:bar
+        ```
+        \"\"\"
+    """,
+    )
+    result = testdir.runpytest("--markdown-docs")
+    assert "fixture 'bar' not found" in result.stdout.str()
+    result.assert_outcomes(errors=1)
+
+
+def test_fixture_overriding_global(testdir):
+    testdir.makeconftest(
+        """
+import pytest
+
+def pytest_markdown_docs_globals():
+    return {
+        "some_global": "foo"
+    }
+
+@pytest.fixture()
+def some_global():
+    return "bar"
+"""
+    )
+
+    testdir.makefile(
+        ".md",
+        """
+        \"\"\"
+        ```python
+        assert some_global == "foo"
+        ```
+
+        ```python fixture:some_global
+        assert some_global == "bar"
+        ```
+        \"\"\"
+    """,
+    )
+    result = testdir.runpytest("--markdown-docs")
+    result.assert_outcomes(passed=2)
+
+
+def test_continuation_mdx_comment(testdir):
+    testdir.makefile(
+        ".mdx",
+        """
+        ```python
+        b = "hello"
+        ```
+        {/* pmd-metadata: continuation */}
+        ```python
+        assert b + " world" == "hello world"
+        ```
+    """,
+    )
+    result = testdir.runpytest("--markdown-docs")
+    result.assert_outcomes(passed=2)
+
+
+def test_specific_fixture_mdx_comment(testdir):
+    testdir.makeconftest(
+        """
+import pytest
+@pytest.fixture()
+def initialize_specific():
+    import pytest_markdown_docs
+    pytest_markdown_docs.bump = getattr(pytest_markdown_docs, "bump", 0) + 1
+    yield "foobar"
+    pytest_markdown_docs.bump -= 1
+"""
+    )
+
+    testdir.makefile(
+        ".mdx",
+        """
+        {/* pmd-metadata: fixture:initialize_specific */}
+        ```python
+        import pytest_markdown_docs
+        assert pytest_markdown_docs.bump == 1
+        assert initialize_specific == "foobar"
+        ```
+    """,
+    )
+    result = testdir.runpytest("--markdown-docs")
+    result.assert_outcomes(passed=1)
+
+
+def test_multiple_fixtures_mdx_comment(testdir):
+    testdir.makeconftest(
+        """
+import pytest
+@pytest.fixture()
+def initialize_specific():
+    import pytest_markdown_docs
+    pytest_markdown_docs.bump = getattr(pytest_markdown_docs, "bump", 0) + 1
+    yield "foobar"
+    pytest_markdown_docs.bump -= 1
+
+@pytest.fixture
+def another_fixture():
+    return "hello"
+"""
+    )
+
+    testdir.makefile(
+        ".mdx",
+        """
+        {/* pmd-metadata: fixture:initialize_specific fixture:another_fixture */}
+        ```python
+        import pytest_markdown_docs
+        assert pytest_markdown_docs.bump == 1
+        assert initialize_specific == "foobar"
+        ```
+    """,
+    )
+    result = testdir.runpytest("--markdown-docs")
+    result.assert_outcomes(passed=1)
+
+
+def test_notest_mdx_comment(testdir):
+    testdir.makefile(
+        ".mdx",
+        """
+        {/* pmd-metadata: notest */}
+        ```python
+        assert True
+        ```
+    """,
+    )
+    result = testdir.runpytest("--markdown-docs")
+    result.assert_outcomes(passed=0)
+
+
+def test_superfences_format_markdown(testdir):
+    testdir.makefile(
+        ".md",
+        """
+        ```python
+        b = "hello"
+        ```
+
+        ```{.python continuation}
+        assert b + " world" == "hello world"
+        ```
+
+        # the lang may not be the first element
+        ```{other_option .python .other-class continuation}
+        assert b + " world" == "hello world"
+        ```
+    """,
+    )
+    result = testdir.runpytest("--markdown-docs", "--markdown-docs-syntax=superfences")
+    result.assert_outcomes(passed=3)
+
+
+def test_superfences_format_docstring(testdir):
+    testdir.makepyfile(
+        """
+        def simple():
+            \"\"\"
+            ```python
+            b = "hello"
+            ```
+
+            ```{.python continuation}
+            assert b + " world" == "hello world"
+            ```
+            \"\"\"
+        """
+    )
+    result = testdir.runpytest("--markdown-docs", "--markdown-docs-syntax=superfences")
+    result.assert_outcomes(passed=2)
+
+
+def test_error_origin_after_docstring_traceback(testdir, support_dir):
+    sample_file = support_dir / "docstring_error_after.py"
+    testdir.makepyfile(**{sample_file.stem: sample_file.read_text()})
+    result = testdir.runpytest("-v", "--markdown-docs")
+
+    data: LineMatcher = result.stdout
+    data.re_match_lines(
+        [
+            r"Traceback \(most recent call last\):",
+            r'\s*File ".*/docstring_error_after.py", line 5, in <module>',
+            r"\s*docstring_error_after.error_after\(\)",
+            r'\s*File ".*/docstring_error_after.py", line 11, in error_after',
+            r'\s*raise Exception\("bar"\)',
+            r"\s*Exception: bar",
+        ],
+        consecutive=True,
+    )
+
+
+def test_error_origin_before_docstring_traceback(testdir, support_dir):
+    sample_file = support_dir / "docstring_error_before.py"
+    testdir.makepyfile(**{sample_file.stem: sample_file.read_text()})
+    result = testdir.runpytest("-v", "--markdown-docs")
+
+    data: LineMatcher = result.stdout
+    data.re_match_lines(
+        [
+            r"Traceback \(most recent call last\):",
+            r'\s*File ".*/docstring_error_before.py", line 9, in <module>',
+            r"\s*docstring_error_before.error_before\(\)",
+            r'\s*File ".*/docstring_error_before.py", line 2, in error_before',
+            r'\s*raise Exception\("foo"\)',
+            r"\s*Exception: foo",
+        ],
+        consecutive=True,
+    )
+
+
+def test_custom_runner(testdir):
+    testdir.makeconftest(
+        """
+        import pytest_markdown_docs._runners
+        
+        @pytest_markdown_docs._runners.register_runner()
+        class LinesAreAllFoo(pytest_markdown_docs._runners.DefaultRunner):
+            def runtest(self, test, args):
+                lines = test.source.strip().split("\\n")
+                for line in lines:
+                    assert line == "foo"
+    """
+    )
+    testdir.makefile(
+        ".md",
+        """
+        ```python runner:LinesAreAllFoo
+        foo
+        foo
+        ```
+        
+        ```python runner:LinesAreAllFoo
+        foo
+        bar
+        ```
+    """,
+    )
+
+    result = testdir.runpytest("-v", "--markdown-docs")
+    result.assert_outcomes(passed=1, failed=1)
+    result.stdout.re_match_lines(
+        [
+            r".*\[CodeFence#1\]\[line:1\].*PASSED.*",
+            r".*\[CodeFence#2\]\[line:6\].*FAILED.*",
+        ],
+        consecutive=True,
+    )
+
+
+def test_admonition_markdown_text_file(testdir):
+    testdir.makeconftest(
+        """
+        def pytest_markdown_docs_globals():
+            return {"a": "hello"}
+
+        def pytest_markdown_docs_markdown_it():
+            import markdown_it
+            from mdit_py_plugins.admon import admon_plugin
+
+            mi = markdown_it.MarkdownIt(config="commonmark")
+            mi.use(admon_plugin)
+            return mi
+    """
+    )
+
+    testdir.makefile(
+        ".md",
+        """
+        ??? quote
+
+            ```python
+            assert a + " world" == "hello world"
+            ```
+
+        !!! info
+            ```python
+            assert False
+            ```
+
+        ???+ note
+            ```python
+            **@ # this is a syntax error
+            ```
+    """,
+    )
+    result = testdir.runpytest("--markdown-docs")
+    result.assert_outcomes(passed=1, failed=2)
+
+
+def test_retry_eventually_succeeds(testdir):
+    """Test that a flaky test succeeds after retrying."""
+    testdir.makepyfile(
+        conftest="""
+attempt_counter = {}
+"""
+    )
+    testdir.makefile(
+        ".md",
+        test_file="""
+```python retry:3
+import conftest
+key = "test_1"
+conftest.attempt_counter[key] = conftest.attempt_counter.get(key, 0) + 1
+assert conftest.attempt_counter[key] >= 2  # Fails first time, passes on retry
+```
+""",
+    )
+    result = testdir.runpytest("--markdown-docs")
+    result.assert_outcomes(passed=1)
+
+
+def test_retry_exhausted(testdir):
+    """Test that a test fails after all retry attempts are exhausted."""
+    testdir.makefile(
+        ".md",
+        test_file="""
+```python retry:2
+assert False  # Always fails
+```
+""",
+    )
+    result = testdir.runpytest("--markdown-docs")
+    result.assert_outcomes(failed=1)
+
+
+def test_retry_with_fixture(testdir):
+    """Test that fixtures are not re-run between retries."""
+    testdir.makepyfile(
+        conftest="""
+import pytest
+
+fixture_call_count = 0
+
+@pytest.fixture
+def counting_fixture():
+    global fixture_call_count
+    fixture_call_count += 1
+    return fixture_call_count
+
+attempt_counter = {}
+"""
+    )
+    testdir.makefile(
+        ".md",
+        test_file="""
+```python retry:3 fixture:counting_fixture
+import conftest
+key = "test_2"
+conftest.attempt_counter[key] = conftest.attempt_counter.get(key, 0) + 1
+
+# Fixture should only be called once (value should stay 1)
+assert counting_fixture == 1
+
+# Fail on first attempt, pass on second
+assert conftest.attempt_counter[key] >= 2
+```
+""",
+    )
+    result = testdir.runpytest("--markdown-docs")
+    result.assert_outcomes(passed=1)
+
+
+def test_retry_with_continuation(testdir):
+    """Test that retry works with continuation blocks."""
+    testdir.makepyfile(
+        conftest="""
+attempt_counter = {}
+"""
+    )
+    testdir.makefile(
+        ".md",
+        test_file="""
+```python
+a = "hello"
+```
+
+```python retry:2 continuation
+import conftest
+key = "test_3"
+conftest.attempt_counter[key] = conftest.attempt_counter.get(key, 0) + 1
+
+# Variable 'a' from previous block should be available
+assert a + " world" == "hello world"
+
+# Fail on first attempt, pass on second
+assert conftest.attempt_counter[key] >= 2
+```
+""",
+    )
+    result = testdir.runpytest("--markdown-docs")
+    result.assert_outcomes(passed=2)
+
+
+def test_retry_invalid_negative(testdir):
+    """Test that negative retry counts raise an error."""
+    testdir.makefile(
+        ".md",
+        test_file="""
+```python retry:-1
+assert True
+```
+""",
+    )
+    result = testdir.runpytest("--markdown-docs")
+    result.assert_outcomes(errors=1)
+    result.stdout.fnmatch_lines(["*Invalid retry count*non-negative integer*"])
+
+
+def test_retry_invalid_non_numeric(testdir):
+    """Test that non-numeric retry counts raise an error."""
+    testdir.makefile(
+        ".md",
+        test_file="""
+```python retry:abc
+assert True
+```
+""",
+    )
+    result = testdir.runpytest("--markdown-docs")
+    result.assert_outcomes(errors=1)
+    result.stdout.fnmatch_lines(["*Invalid retry count*non-negative integer*"])
+
+
+def test_retry_multiple_values_error(testdir):
+    """Test that multiple retry values raise an error."""
+    testdir.makefile(
+        ".md",
+        test_file="""
+```python retry:2 retry:3
+assert True
+```
+""",
+    )
+    result = testdir.runpytest("--markdown-docs")
+    result.assert_outcomes(errors=1)
+    result.stdout.fnmatch_lines(["*Multiple retry counts are not supported*"])
+
+
+def test_retry_zero(testdir):
+    """Test that retry:0 behaves the same as no retry."""
+    testdir.makefile(
+        ".md",
+        test_file="""
+```python retry:0
+assert False
+```
+""",
+    )
+    result = testdir.runpytest("--markdown-docs")
+    result.assert_outcomes(failed=1)
+
+
+def test_retry_mdx_comment(testdir):
+    """Test that retry works with MDX comment metadata."""
+    testdir.makepyfile(
+        conftest="""
+attempt_counter = {}
+"""
+    )
+    testdir.makefile(
+        ".mdx",
+        test_file="""
+{/* pmd-metadata: retry:3 */}
+```python
+import conftest
+key = "test_4"
+conftest.attempt_counter[key] = conftest.attempt_counter.get(key, 0) + 1
+assert conftest.attempt_counter[key] >= 2
+```
+""",
+    )
+    result = testdir.runpytest("--markdown-docs")
+    result.assert_outcomes(passed=1)
+
+
+def test_retry_with_docstring(testdir):
+    """Test that retry works in Python docstrings."""
+    testdir.makepyfile(
+        conftest="""
+attempt_counter = {}
+"""
+    )
+    testdir.makepyfile(
+        test_module="""
+def my_function():
+    \"\"\"
+    ```python retry:3
+    import conftest
+    key = "test_5"
+    conftest.attempt_counter[key] = conftest.attempt_counter.get(key, 0) + 1
+    assert conftest.attempt_counter[key] >= 2
+    ```
+    \"\"\"
+    pass
+"""
+    )
+    result = testdir.runpytest("--markdown-docs")
+    result.assert_outcomes(passed=1)
+
+
+# ============================================================================
+# Async fixture tests (pytest-asyncio integration)
+# ============================================================================
+
+
+def test_async_fixture_basic(testdir):
+    """Test that a basic async fixture works with markdown tests."""
+    testdir.makeconftest(
+        """
+import pytest_asyncio
+
+@pytest_asyncio.fixture
+async def async_value():
+    return "async_hello"
+"""
+    )
+    testdir.makefile(
+        ".md",
+        test_file="""
+```python fixture:async_value
+assert async_value == "async_hello"
+```
+""",
+    )
+    result = testdir.runpytest("--markdown-docs", "-v")
+    result.assert_outcomes(passed=1)
+
+
+def test_async_fixture_with_await(testdir):
+    """Test that an async fixture that uses await works."""
+    testdir.makeconftest(
+        """
+import asyncio
+import pytest_asyncio
+
+@pytest_asyncio.fixture
+async def async_delayed_value():
+    await asyncio.sleep(0.01)
+    return "delayed_value"
+"""
+    )
+    testdir.makefile(
+        ".md",
+        test_file="""
+```python fixture:async_delayed_value
+assert async_delayed_value == "delayed_value"
+```
+""",
+    )
+    result = testdir.runpytest("--markdown-docs", "-v")
+    result.assert_outcomes(passed=1)
+
+
+def test_async_generator_fixture(testdir):
+    """Test that an async generator fixture (with yield) works."""
+    testdir.makeconftest(
+        """
+import pytest_asyncio
+import pytest_markdown_docs
+
+@pytest_asyncio.fixture
+async def async_resource():
+    # Setup
+    pytest_markdown_docs.async_setup_called = True
+    yield "resource_value"
+    # Teardown
+    pytest_markdown_docs.async_teardown_called = True
+"""
+    )
+    testdir.makefile(
+        ".md",
+        test_file="""
+```python fixture:async_resource
+import pytest_markdown_docs
+assert async_resource == "resource_value"
+assert pytest_markdown_docs.async_setup_called == True
+```
+""",
+    )
+    result = testdir.runpytest("--markdown-docs", "-v")
+    result.assert_outcomes(passed=1)
+    # Verify teardown was called
+    assert getattr(pytest_markdown_docs, "async_teardown_called", False) is True
+    # Clean up
+    delattr(pytest_markdown_docs, "async_setup_called")
+    delattr(pytest_markdown_docs, "async_teardown_called")
+
+
+def test_async_fixture_chain(testdir):
+    """Test that an async fixture can depend on another async fixture."""
+    testdir.makeconftest(
+        """
+import pytest_asyncio
+
+@pytest_asyncio.fixture
+async def base_async_value():
+    return "base"
+
+@pytest_asyncio.fixture
+async def derived_async_value(base_async_value):
+    return f"{base_async_value}_derived"
+"""
+    )
+    testdir.makefile(
+        ".md",
+        test_file="""
+```python fixture:derived_async_value
+assert derived_async_value == "base_derived"
+```
+""",
+    )
+    result = testdir.runpytest("--markdown-docs", "-v")
+    result.assert_outcomes(passed=1)
+
+
+def test_async_fixture_depends_on_sync_fixture(testdir):
+    """Test that an async fixture can depend on a sync fixture."""
+    testdir.makeconftest(
+        """
+import pytest
+import pytest_asyncio
+
+@pytest.fixture
+def sync_value():
+    return "sync"
+
+@pytest_asyncio.fixture
+async def async_combined(sync_value):
+    return f"{sync_value}_async"
+"""
+    )
+    testdir.makefile(
+        ".md",
+        test_file="""
+```python fixture:async_combined
+assert async_combined == "sync_async"
+```
+""",
+    )
+    result = testdir.runpytest("--markdown-docs", "-v")
+    result.assert_outcomes(passed=1)
+
+
+def test_sync_fixture_depends_on_async_fixture(testdir):
+    """Test that a sync fixture can depend on an async fixture."""
+    testdir.makeconftest(
+        """
+import pytest
+import pytest_asyncio
+
+@pytest_asyncio.fixture
+async def async_base():
+    return "async"
+
+@pytest.fixture
+def sync_derived(async_base):
+    return f"{async_base}_sync"
+"""
+    )
+    testdir.makefile(
+        ".md",
+        test_file="""
+```python fixture:sync_derived
+assert sync_derived == "async_sync"
+```
+""",
+    )
+    result = testdir.runpytest("--markdown-docs", "-v")
+    result.assert_outcomes(passed=1)
+
+
+def test_multiple_async_fixtures(testdir):
+    """Test that multiple async fixtures can be used in a single test."""
+    testdir.makeconftest(
+        """
+import pytest_asyncio
+
+@pytest_asyncio.fixture
+async def async_value_a():
+    return "A"
+
+@pytest_asyncio.fixture
+async def async_value_b():
+    return "B"
+"""
+    )
+    testdir.makefile(
+        ".md",
+        test_file="""
+```python fixture:async_value_a fixture:async_value_b
+assert async_value_a == "A"
+assert async_value_b == "B"
+```
+""",
+    )
+    result = testdir.runpytest("--markdown-docs", "-v")
+    result.assert_outcomes(passed=1)
+
+
+def test_async_fixture_in_docstring(testdir):
+    """Test that async fixtures work in Python docstrings."""
+    testdir.makeconftest(
+        """
+import pytest_asyncio
+
+@pytest_asyncio.fixture
+async def async_docstring_value():
+    return "docstring_async"
+"""
+    )
+    testdir.makepyfile(
+        test_module="""
+def my_function():
+    \"\"\"
+    ```python fixture:async_docstring_value
+    assert async_docstring_value == "docstring_async"
+    ```
+    \"\"\"
+    pass
+"""
+    )
+    result = testdir.runpytest("--markdown-docs", "-v")
+    result.assert_outcomes(passed=1)
+
+
+def test_async_fixture_with_sync_fixture(testdir):
+    """Test that async fixtures work alongside regular sync fixtures."""
+    testdir.makeconftest(
+        """
+import pytest
+import pytest_asyncio
+
+@pytest_asyncio.fixture
+async def async_value():
+    return "async_hello"
+
+@pytest.fixture
+def sync_value():
+    return "sync_world"
+"""
+    )
+    testdir.makefile(
+        ".md",
+        test_file="""
+```python fixture:async_value fixture:sync_value
+assert async_value == "async_hello"
+assert sync_value == "sync_world"
+assert async_value + " " + sync_value == "async_hello sync_world"
+```
+""",
+    )
+    result = testdir.runpytest("--markdown-docs", "-v")
+    result.assert_outcomes(passed=1)
+
+
+# ============================================================================
+# Top-level await tests
+# ============================================================================
+
+
+def test_top_level_await(testdir):
+    """Test that bare await at top level works in code blocks."""
+    testdir.makefile(
+        ".md",
+        test_file="""
+```python
+import asyncio
+await asyncio.sleep(0)
+```
+""",
+    )
+    result = testdir.runpytest("--markdown-docs")
+    result.assert_outcomes(passed=1)
+
+
+def test_top_level_async_for(testdir):
+    """Test that async for at top level works in code blocks."""
+    testdir.makefile(
+        ".md",
+        test_file="""
+```python
+import asyncio
+
+async def arange(n):
+    for i in range(n):
+        yield i
+
+results = []
+async for i in arange(3):
+    results.append(i)
+assert results == [0, 1, 2]
+```
+""",
+    )
+    result = testdir.runpytest("--markdown-docs")
+    result.assert_outcomes(passed=1)
+
+
+def test_top_level_async_with(testdir):
+    """Test that async with at top level works in code blocks."""
+    testdir.makefile(
+        ".md",
+        test_file="""
+```python
+import contextlib
+
+@contextlib.asynccontextmanager
+async def async_ctx():
+    yield "hello"
+
+async with async_ctx() as val:
+    assert val == "hello"
+```
+""",
+    )
+    result = testdir.runpytest("--markdown-docs")
+    result.assert_outcomes(passed=1)
+
+
+def test_continuation_with_await(testdir):
+    """Test that continuation blocks can use await with state from sync blocks."""
+    testdir.makefile(
+        ".md",
+        test_file="""
+```python
+value = 42
+```
+
+```python continuation
+import asyncio
+await asyncio.sleep(0)
+assert value == 42
+```
+""",
+    )
+    result = testdir.runpytest("--markdown-docs")
+    result.assert_outcomes(passed=2)
+
+
+def test_async_fixture_shares_event_loop(testdir):
+    """Async fixture and top-level await code block must share the same event loop."""
+    testdir.makeini("[pytest]\nasyncio_mode = auto\n")
+    testdir.makeconftest(
+        """
+import asyncio
+import pytest
+
+@pytest.fixture
+async def loop_id():
+    return id(asyncio.get_running_loop())
+"""
+    )
+    testdir.makefile(
+        ".md",
+        test_file="""
+```python fixture:loop_id
+import asyncio
+await asyncio.sleep(0)
+assert loop_id == id(asyncio.get_running_loop())
+```
+""",
+    )
+    result = testdir.runpytest("--markdown-docs", "-v")
+    result.assert_outcomes(passed=1)
+
+
+def test_top_level_await_requires_pytest_asyncio(testdir):
+    """Async code blocks should error clearly when pytest-asyncio is not installed."""
+    testdir.makeconftest(
+        """
+import pytest_markdown_docs.plugin as _plugin
+_plugin._get_asyncio_runner = lambda *a, **kw: None
+"""
+    )
+    testdir.makefile(
+        ".md",
+        test_file="""
+```python
+import asyncio
+await asyncio.sleep(0)
+```
+""",
+    )
+    result = testdir.runpytest("--markdown-docs")
+    result.assert_outcomes(failed=1)
+    result.stdout.fnmatch_lines(["*pytest-asyncio>=1.1.0*"])
