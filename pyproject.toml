@@ -1,0 +1,34 @@
+[project]
+name = "py-md-docs"
+version = "0.1.0"
+description = "A powerful pytest plugin to test Python code blocks in markdown files and docstrings"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Ahmed Hassan" }
+]
+classifiers = [
+    "Framework :: Pytest",
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "markdown-it-py>=2.2.0,<4.0",
+    "pytest>=7.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+]
+
+[project.entry-points.pytest11]
+py_md_docs = "py_md_docs.plugin"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
